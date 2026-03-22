@@ -93,7 +93,7 @@ export async function POST(req: NextRequest) {
           apiKey: process.env.ANTHROPIC_API_KEY
         })
         const prompt = `
-You are an ATS system used by Indian companies like TCS, Infosys, Wipro.
+You are an ATS system used by Indian companies like all Indian (Startup to MNC Company).
 
 RESUME: ${resumeText}
 JOB DESCRIPTION: ${jobDescription}

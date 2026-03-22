@@ -6,7 +6,7 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 )
 
-// Generate unique referral code from user id
+// Deterministic code from userId — always same code for same user
 function generateCode(userId: string): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
   const seed = userId.replace(/-/g, '').substring(0, 8)
@@ -18,7 +18,7 @@ function generateCode(userId: string): string {
   return code
 }
 
-// GET — get or create referral code for user
+// GET — get or create referral code for a user
 export async function GET(req: NextRequest) {
   const userId = req.nextUrl.searchParams.get('userId')
   if (!userId) return NextResponse.json({ error: 'Missing userId' }, { status: 400 })
@@ -36,7 +36,13 @@ export async function GET(req: NextRequest) {
   const code = generateCode(userId)
   const { data, error } = await supabase
     .from('referral_codes')
-    .insert({ user_id: userId, code })
+    .insert({
+      user_id: userId,
+      code,
+      total_referrals: 0,
+      successful_referrals: 0,
+      credits_earned: 0,
+    })
     .select()
     .single()
 
@@ -44,16 +50,18 @@ export async function GET(req: NextRequest) {
   return NextResponse.json({ success: true, referral: data })
 }
 
-// POST — validate referral code and apply discount
 export async function POST(req: NextRequest) {
-  const { action, code, referredUserId, referredEmail } = await req.json()
+  const body = await req.json()
+  const { action, code, referredUserId, referredEmail } = body
 
+  // ── Validate a code (preview only, no side effects) ──────
   if (action === 'validate') {
-    // Check if code exists
+    if (!code) return NextResponse.json({ error: 'Missing code' }, { status: 400 })
+
     const { data: refCode } = await supabase
       .from('referral_codes')
       .select('*')
-      .eq('code', code.toUpperCase())
+      .eq('code', code.toUpperCase().trim())
       .single()
 
     if (!refCode) return NextResponse.json({ error: 'Invalid referral code' }, { status: 404 })
@@ -61,86 +69,169 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       success: true,
       valid: true,
-      discount: 50,
-      message: '✅ Valid code! You get ₹50 off your first plan'
+      message: '✅ Valid code! Both you and your friend get 20 credits after your first payment.',
     })
   }
 
+  // ── Apply a referral code at registration time ───────────
   if (action === 'apply') {
-    // Get referral code details
+    if (!code || !referredUserId) {
+      return NextResponse.json({ error: 'Missing code or userId' }, { status: 400 })
+    }
+
+    const cleanCode = code.toUpperCase().trim()
+
+    // Find the referral code
     const { data: refCode } = await supabase
       .from('referral_codes')
       .select('*')
-      .eq('code', code.toUpperCase())
+      .eq('code', cleanCode)
       .single()
 
-    if (!refCode) return NextResponse.json({ error: 'Invalid code' }, { status: 404 })
+    if (!refCode) return NextResponse.json({ error: 'Invalid referral code' }, { status: 404 })
 
     // Prevent self-referral
-    if (refCode.user_id === referredUserId)
-      return NextResponse.json({ error: 'Cannot use your own referral code' }, { status: 400 })
+    if (refCode.user_id === referredUserId) {
+      return NextResponse.json({ error: 'You cannot use your own referral code' }, { status: 400 })
+    }
 
-    // Check not already referred
+    // Check if this user has already used ANY referral code
     const { data: existingRef } = await supabase
       .from('referrals')
-      .select('id')
+      .select('id, status')
       .eq('referred_id', referredUserId)
       .single()
 
-    if (existingRef) return NextResponse.json({ error: 'You have already used a referral code' }, { status: 400 })
-
-    // Create referral record
-    const discountCode = `FRIEND50-${code}`
-    await supabase.from('referrals').insert({
-      referrer_id: refCode.user_id,
-      referred_id: referredUserId,
-      referred_email: referredEmail,
-      status: 'signed_up',
-      reward_credits: 50,
-      discount_code: discountCode,
-      discount_amount: 50
-    })
-
-    // Update referral code stats
-    await supabase
-      .from('referral_codes')
-      .update({
-        total_referrals: refCode.total_referrals + 1,
-        successful_referrals: refCode.successful_referrals + 1
-      })
-      .eq('id', refCode.id)
-
-    // Give referrer 50 credits
-    const { data: referrerSub } = await supabase
-      .from('subscriptions')
-      .select('credits_remaining')
-      .eq('user_id', refCode.user_id)
-      .single()
-
-    if (referrerSub) {
-      await supabase
-        .from('subscriptions')
-        .update({ credits_remaining: (referrerSub.credits_remaining || 0) + 50 })
-        .eq('user_id', refCode.user_id)
+    if (existingRef) {
+      return NextResponse.json({ error: 'You have already used a referral code' }, { status: 400 })
     }
 
-    // Create discount code in discount_codes table for referred user
-    await supabase.from('discount_codes').upsert({
-      code: discountCode,
-      discount_percent: 0,
-      discount_amount: 50,
-      max_uses: 1,
-      used_count: 0,
-      description: `₹50 referral discount for ${referredEmail}`,
-      active: true,
-      restricted_to_user: referredUserId
-    }, { onConflict: 'code' }).then(() => {}) // ignore if discount_codes doesn't have these cols
+    // Check if THIS referrer already referred this specific person
+    const { data: duplicateRef } = await supabase
+      .from('referrals')
+      .select('id')
+      .eq('referrer_id', refCode.user_id)
+      .eq('referred_id', referredUserId)
+      .single()
+
+    if (duplicateRef) {
+      return NextResponse.json({ error: 'This referral code has already been used for your account' }, { status: 400 })
+    }
+
+    // Create referral record — status "signed_up", rewards NOT given yet
+    const { error: insertError } = await supabase.from('referrals').insert({
+      referrer_id: refCode.user_id,
+      referred_id: referredUserId,
+      referred_email: referredEmail || '',
+      referral_code: cleanCode,
+      status: 'signed_up',           // Becomes 'rewarded' after first payment
+      reward_credits: 20,
+      reward_given: false,            // Credits NOT added yet — only on first payment
+    })
+
+    if (insertError) {
+      return NextResponse.json({ error: insertError.message }, { status: 500 })
+    }
+
+    // Update referral_codes stats (count registrations, not payments)
+    await supabase
+      .from('referral_codes')
+      .update({ total_referrals: (refCode.total_referrals || 0) + 1 })
+      .eq('id', refCode.id)
 
     return NextResponse.json({
       success: true,
-      message: '🎉 Referral applied! Your friend gets +50 credits. You get ₹50 off your plan!',
-      discountCode,
-      discountAmount: 50
+      message: '🎉 Code applied! You and your friend will each get +20 credits after your first payment.',
+    })
+  }
+
+  // ── Called from payment verification — give rewards to both ──
+  if (action === 'process_first_payment') {
+    const { userId } = body
+    if (!userId) return NextResponse.json({ error: 'Missing userId' }, { status: 400 })
+
+    // Find any pending referral for this user
+    const { data: pendingRef } = await supabase
+      .from('referrals')
+      .select('*')
+      .eq('referred_id', userId)
+      .eq('reward_given', false)
+      .eq('status', 'signed_up')
+      .single()
+
+    if (!pendingRef) {
+      // No pending referral — this user wasn't referred, or rewards already given
+      return NextResponse.json({ success: true, rewarded: false, message: 'No pending referral found' })
+    }
+
+    // Give +20 credits to the REFERRED user (the one who just paid)
+    const { data: referredSub } = await supabase
+      .from('subscriptions')
+      .select('credits_remaining')
+      .eq('user_id', userId)
+      .single()
+
+    if (referredSub) {
+      const newCredits = (referredSub.credits_remaining >= 999999)
+        ? 999999
+        : referredSub.credits_remaining + 20
+      await supabase
+        .from('subscriptions')
+        .update({ credits_remaining: newCredits })
+        .eq('user_id', userId)
+    }
+
+    // Give +20 credits to the REFERRER
+    const { data: referrerSub } = await supabase
+      .from('subscriptions')
+      .select('credits_remaining')
+      .eq('user_id', pendingRef.referrer_id)
+      .single()
+
+    if (referrerSub) {
+      const newCredits = (referrerSub.credits_remaining >= 999999)
+        ? 999999
+        : referrerSub.credits_remaining + 20
+      await supabase
+        .from('subscriptions')
+        .update({ credits_remaining: newCredits })
+        .eq('user_id', pendingRef.referrer_id)
+    }
+
+    // Mark referral as rewarded so it only triggers once
+    await supabase
+      .from('referrals')
+      .update({
+        reward_given: true,
+        status: 'rewarded',
+        rewarded_at: new Date().toISOString(),
+      })
+      .eq('id', pendingRef.id)
+
+    // Update referral_codes successful count
+    const { data: refCodeRow } = await supabase
+      .from('referral_codes')
+      .select('successful_referrals, credits_earned')
+      .eq('user_id', pendingRef.referrer_id)
+      .single()
+
+    if (refCodeRow) {
+      await supabase
+        .from('referral_codes')
+        .update({
+          successful_referrals: (refCodeRow.successful_referrals || 0) + 1,
+          credits_earned: (refCodeRow.credits_earned || 0) + 20,
+        })
+        .eq('user_id', pendingRef.referrer_id)
+    }
+
+    console.log(`✅ Referral rewards given: referrer ${pendingRef.referrer_id} and referred ${userId} each got +20 credits`)
+
+    return NextResponse.json({
+      success: true,
+      rewarded: true,
+      message: '🎉 Both you and your friend received +20 credits!',
+      referrerId: pendingRef.referrer_id,
     })
   }
 
