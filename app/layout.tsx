@@ -1,5 +1,6 @@
 import type { Metadata } from 'next'
 import './globals.css'
+import { FeatureFlagProvider } from '@/components/FeatureFlagProvider'
 
 export const metadata: Metadata = {
   title: 'AI Placement Coach',
@@ -13,7 +14,11 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        <FeatureFlagProvider>
+          {children}
+        </FeatureFlagProvider>
+      </body>
     </html>
   )
 }

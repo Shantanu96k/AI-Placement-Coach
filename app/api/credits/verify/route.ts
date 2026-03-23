@@ -19,12 +19,19 @@ export async function POST(req: NextRequest) {
       amountInr,
     } = await req.json()
 
+    // Validate required fields
     if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature || !userId) {
-      return NextResponse.json({ error: 'Missing payment verification details' }, { status: 400 })
+      return NextResponse.json(
+        { error: 'Missing payment verification details' },
+        { status: 400 }
+      )
     }
 
     if (!process.env.RAZORPAY_KEY_SECRET) {
-      return NextResponse.json({ error: 'Payment verification not configured' }, { status: 500 })
+      return NextResponse.json(
+        { error: 'Payment verification not configured' },
+        { status: 500 }
+      )
     }
 
     // ── Verify Razorpay signature ─────────────────────────
@@ -35,7 +42,7 @@ export async function POST(req: NextRequest) {
 
     if (expectedSignature !== razorpay_signature) {
       return NextResponse.json(
-        { error: 'Payment verification failed. Invalid signature.' },
+        { error: 'Payment verification failed. Invalid signature. Please contact support.' },
         { status: 400 }
       )
     }
@@ -56,6 +63,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'User account not found' }, { status: 404 })
     }
 
+    // Don't change unlimited credits
     const currentCredits = sub.credits_remaining >= 999999 ? 999999 : sub.credits_remaining
     const newCredits = currentCredits >= 999999 ? 999999 : currentCredits + creditsToAdd
 
@@ -65,13 +73,14 @@ export async function POST(req: NextRequest) {
       .eq('user_id', userId)
 
     if (updateError) {
+      console.error('Failed to update credits after payment:', updateError)
       return NextResponse.json(
-        { error: 'Payment successful but credits could not be added. Contact support with: ' + razorpay_payment_id },
+        { error: 'Payment successful but credits could not be added. Please contact support with payment ID: ' + razorpay_payment_id },
         { status: 500 }
       )
     }
 
-    // Log transaction
+    // Try to log the transaction (ignore errors if table doesn't exist)
     try {
       await supabase.from('credit_transactions').insert({
         user_id: userId,
@@ -83,52 +92,24 @@ export async function POST(req: NextRequest) {
         status: 'completed',
         notes: packageName || 'Credit purchase',
       })
-    } catch { /* table may not exist yet */ }
-
-    // ── Check if this is user's first payment — if so, award referral ──
-    let referralMessage = ''
-    try {
-      // Check if user has any previous completed transactions (this one just logged above)
-      const { data: prevTransactions } = await supabase
-        .from('credit_transactions')
-        .select('id')
-        .eq('user_id', userId)
-        .eq('status', 'completed')
-
-      // If only 1 transaction (the one we just inserted), this is their first payment
-      const isFirstPayment = !prevTransactions || prevTransactions.length <= 1
-
-      if (isFirstPayment) {
-        // Trigger referral reward via internal API call (or inline logic)
-        const referralRes = await fetch(
-          `${process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000'}/api/referrals`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'process_first_payment', userId }),
-          }
-        )
-        const referralData = await referralRes.json()
-        if (referralData.rewarded) {
-          referralMessage = ' + 20 bonus referral credits added! 🎉'
-        }
-      }
-    } catch (e) {
-      // Referral processing is non-critical — don't fail the whole payment
-      console.error('Referral processing error:', e)
+    } catch {
+      // Table may not exist yet — credits still added successfully
     }
 
     console.log(`✅ Credits verified: user ${userId} → +${creditsToAdd} credits (payment: ${razorpay_payment_id})`)
 
     return NextResponse.json({
       success: true,
-      message: `🎉 Payment successful! ${creditsToAdd} credits added.${referralMessage}`,
+      message: `🎉 Payment successful! ${creditsToAdd} credits added to your account.`,
       credits: creditsToAdd,
       newBalance: newCredits,
       paymentId: razorpay_payment_id,
     })
   } catch (error: any) {
     console.error('Verify credit payment error:', error)
-    return NextResponse.json({ error: 'Payment verification failed: ' + error.message }, { status: 500 })
+    return NextResponse.json(
+      { error: 'Payment verification failed: ' + error.message },
+      { status: 500 }
+    )
   }
 }

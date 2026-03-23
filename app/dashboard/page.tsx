@@ -5,6 +5,10 @@ import Link from 'next/link'
 import { createClient } from '@supabase/supabase-js'
 import AdminSuperWidget from '@/components/AdminSuperWidget'
 import ReferralSection from '@/components/ReferralSection'
+import AnnouncementBanner from '@/components/AnnouncementBanner'
+import { useActivityLogger } from '@/hooks/useActivityLogger'
+import SupportWidget from '@/components/SupportWidget'
+import { useFeatureFlag } from '@/components/FeatureFlagProvider'
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -353,6 +357,7 @@ export default function DashboardPage() {
 
   const PLAN_COLORS: Record<string, string> = { free: '#a1a1aa', basic: '#3b82f6', pro: '#8b5cf6', premium: '#f59e0b' }
   const planColor = PLAN_COLORS[plan] || '#a1a1aa'
+  useActivityLogger(user?.id, user?.email, 'viewed_dashboard')
 
   const QUICK_ACTIONS = [
     { emoji: '📄', label: 'Resume Builder', desc: 'ATS-friendly resume for Indian companies.', href: '/resume', color: '#2563eb', credits: '5 credits', tag: 'Popular', locked: false, anim: 'float' },
@@ -582,6 +587,7 @@ export default function DashboardPage() {
 
           {/* Page Content */}
           <div style={{ padding: '32px 40px', maxWidth: '1400px', margin: '0 auto' }}>
+            <AnnouncementBanner plan={plan} />
 
             {/* Daily Tip */}
             <div style={{ padding: '20px 28px', marginBottom: '28px', display: 'flex', alignItems: 'center', gap: '20px', background: 'linear-gradient(90deg, rgba(124,58,237,0.1), rgba(37,99,235,0.05))', border: '1px solid rgba(124,58,237,0.2)', borderRadius: '16px', borderLeft: '4px solid #a78bfa', animation: 'fadeSlideUp 0.5s ease both' }}>
@@ -753,6 +759,8 @@ export default function DashboardPage() {
       {(user?.email === 'your-admin-email@gmail.com' || process.env.NEXT_PUBLIC_ADMIN_KEY === 'admin123') && (
         <AdminSuperWidget adminKey={process.env.NEXT_PUBLIC_ADMIN_KEY || 'admin123'} />
       )}
+      {user && <SupportWidget userId={user?.id} userEmail={user?.email} />}
+
     </>
   )
 }
